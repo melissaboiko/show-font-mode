@@ -6,6 +6,7 @@
 ;; Keywords: faces, i18n, unicode, fonts, fontsets
 ;; Package-Requires: ((emacs "25.1"))
 ;; Version: 0.1
+;; Homepage: https://github.com/melissaboiko/show-font-mode
 
 ;; This program is free software; you can redistribute it and/or
 ;; modify it under the terms of the GNU Affero General Public License
@@ -34,16 +35,40 @@
 ;;;
 ;;; This package also provides a colourful overlay to paint each font
 ;;; in the buffer in a different colour
-;;; (‘show-font-mode-make-overlay’).  This feature is currently a bit
+;;; (‘show-font-mode-overlay’).  This feature is currently a bit
 ;;; buggy but it works to visualise font selection.  Use
 ;;; ‘show-font-mode-clear-overlay’ to undo.
 
 ;;; Code:
 
+(defvar show-font-mode-palette-pan
+  '("#ff1b8d" "#ff4b6a" "#ff7b47" "#ffaa23" "#ffda00" "#c6d040" "#8dc780" "#54bdbf" "#1bb3ff")
+  "The pansexual flag, extended to a 9 steps palette.")
+
+(defvar show-font-mode-palette-pan-lightbg
+  '("#ffff1b1b8d8d" "#ffff4b4b6a6a" "#fa4455382bf0" "#ef4264a00000" "#e0a3715c0000" "#b1bf8b5e0000" "#58a7a0b94a80" "#25c99d3abce1" "#00009274fd7c")
+  "The pansexual flag, extended to a 9 steps palette, darkened for light backgrounds.")
+
 (defcustom show-font-mode-font-format-fn
   'show-font-mode-font-format
   "Function to format a font object for the mode-line."
   :type 'function :group 'show-font-mode)
+
+(defcustom show-font-mode-palette-custom
+  show-font-mode-palette-pan-lightbg ;; fetched by value to init it
+  "Default palette for ‘show-font-mode-overlay’."
+  :type '(repeat color)
+  :group 'show-font-mode)
+
+(defcustom show-font-mode-palette 'show-font-mode-palette-custom
+  "The palette variable to highlight fonts on.
+
+This is a symbol, the name of a variable with a list of
+ colours (of any length).  ‘show-font-mode-palette-custom’ is
+ provided for convenient customisation."
+  :type 'variable
+  :group 'show-font-mode)
+
 
 (defvar show-font-mode--last-position ""
   "Keeps track of cursor position.")
@@ -51,7 +76,11 @@
 (defvar show-font-mode--string ""
   "Keeps the current modeline output string.")
 
-;;;###autoload’
+(defvar show-font-mode--known-fonts nil
+  "Internal variable to keep track of fonts seen.")
+
+
+;;;###autoload
 (define-minor-mode show-font-mode
   "Toggle display of font at point in the mode line (show font mode).
 
@@ -69,32 +98,8 @@ If called from Lisp, enable the mode if ARG is omitted or nil."
         (show-font-mode--post-command)) ;; kickstart it
     (remove-hook 'post-command-hook 'show-font-mode--post-command)))
 
-(defun show-font-mode--get-position ()
-  "List of elements we track position of."
-  (list (point) (current-buffer) (selected-window) (selected-frame)))
-
-(defun show-font-mode--post-command ()
-  "Run on ‘post-command-hook’ to update the font in modeline."
-
-  ;; ‘font-at’ can’t handle the very last position
-  (unless (or (window-minibuffer-p) (eq (point) (point-max)))
-    (let ((pos (show-font-mode--get-position))
-          (last show-font-mode--last-position))
-      (when (or (not last) (not (equal pos last)))
-        (show-font-mode--update-mode-line pos)
-        (setq show-font-mode--last-position pos)
-        (redisplay)))))
-
-(defun show-font-mode--update-mode-line (pos)
-  "Update the mode-line to font at position POS."
-  (setq show-font-mode--string
-        (funcall show-font-mode-font-format-fn
-                 (font-at (car pos) (elt pos 2))))
-  (force-mode-line-update)
-  (redisplay))
-
 (defun show-font-mode-font-format (font)
-  "Format a FONT object for the modeline."
+  "Format information from FONT (a font object) for the modeline."
   (if (not (fontp font))
       "--"
     (let* ((family (font-get font :family))
@@ -113,47 +118,41 @@ If called from Lisp, enable the mode if ARG is omitted or nil."
               family
               size))))
 
-(defvar show-font-mode-palette-pan
-  '("#ff1b8d" "#ff4b6a" "#ff7b47" "#ffaa23" "#ffda00" "#c6d040" "#8dc780" "#54bdbf" "#1bb3ff")
-  "The pansexual flag, extended to a 9 steps palette.")
-(defvar show-font-mode-palette-pan-lightbg
-  '("#ffff1b1b8d8d" "#ffff4b4b6a6a" "#fa4455382bf0" "#ef4264a00000" "#e0a3715c0000" "#b1bf8b5e0000" "#58a7a0b94a80" "#25c99d3abce1" "#00009274fd7c")
-  "The pansexual flag, extended to a 9 steps palette, darkened for light backgrounds.")
-
-(defcustom show-font-mode-palette-custom
-  show-font-mode-palette-pan-lightbg
-  "Default palette for show-font-mode."
-  :type '(repeat color)
-  :group show-font-mode)
-
-(defcustom show-font-mode-palette 'show-font-mode-palette-custom
-  "The palette variable to highlight fonts on.
-
-The symbol must point to a list of colours, like
-‘show-font-mode-palette-custom’."
-  :type 'variable
-  :group 'show-font-mode)
-
-(defun show-font-mode-color-overlay ()
-  "Overlays different colours for different fonts on current buffer.
+(defun show-font-mode-overlay ()
+  "Add color overlay for each distinct font.
 
 Uses ‘show-font-mode-palette’.  If you have more fonts than
-colours, colours will repeat."
+colours, colours will repeat in a cycle.
+
+Text additions are not updated currently, so it setups self to be
+undone on any modification via ‘first-change-hook’.  You can
+clear it manually with ‘show-font-mode-clear-overlay’."
 
   (interactive)
-  (save-excursion
-    (goto-char (point-min))
-    (while (not (eq (point) (- (point-max) 1)))
-      (show-font-mode--make-overlay-at (point))
-      (forward-char 1))))
+  (dolist (pos (number-sequence (point-min) (- (point-max) 1)))
+    (show-font-mode--make-overlay-at pos))
+  (add-hook 'first-change-hook
+            'show-font-mode--overlay-clear-on-change
+            nil 'local))
 
-(defvar show-font-mode--known-fonts nil
-  "Internal variable to keep track of fonts seen.")
+
+(defun show-font-mode-clear-overlay()
+  "Remove overlays from ‘show-font-mode-overlay’."
+  (interactive)
+  (dolist (ov (overlays-in (point-min) (point-max)))
+    (let ((cat (overlay-get ov 'category)))
+      (when(eq cat 'show-font-mode))
+      (delete-overlay ov))))
+
+;; internal stuff follows
+
 
 (defun show-font-mode--color-for (font)
-  "Picks a color for the font family from FONT object.
+  "Picks a color for the font family from FONT object."
 
-TODO: allow custom indexing rather than just family."
+  ;; TODO: allow custom hashing rather than just font family (pixel
+  ;; width could be especially useful).
+
   (let* ((family (elt (query-font font) 0))
          (color (alist-get family show-font-mode--known-fonts nil nil 'equal)))
     (or color
@@ -168,6 +167,34 @@ TODO: allow custom indexing rather than just family."
                        'append)
           color))))
 
+
+(defun show-font-mode--get-position ()
+  "List of elements we track position of."
+  (list (point) (current-buffer) (selected-window) (selected-frame)))
+
+
+(defun show-font-mode--post-command ()
+  "Run on ‘post-command-hook’ to update the font in modeline."
+
+  ;; ‘font-at’ can’t handle the very last position
+  (unless (or (window-minibuffer-p) (eq (point) (point-max)))
+    (let ((pos (show-font-mode--get-position))
+          (last show-font-mode--last-position))
+      (when (or (not last) (not (equal pos last)))
+        (show-font-mode--update-mode-line pos)
+        (setq show-font-mode--last-position pos)
+        (redisplay)))))
+
+
+(defun show-font-mode--update-mode-line (pos)
+  "Update the mode-line to font at position POS."
+  (setq show-font-mode--string
+        (funcall show-font-mode-font-format-fn
+                 (font-at (car pos) (elt pos 2))))
+  (force-mode-line-update)
+  (redisplay))
+
+
 (defun show-font-mode--make-overlay-at (pos)
   "Add font color overlay to character at position POS."
   (let ((o (make-overlay pos (+ pos 1))))
@@ -177,6 +204,7 @@ TODO: allow custom indexing rather than just family."
                   :foreground
                   (show-font-mode--color-for (font-at pos))))))
 
+
 (defun show-font-mode--overlay-clear-on-change ()
   "Break overlay on touch via ‘first-change-hook’."
   (show-font-mode-clear-overlay)
@@ -184,41 +212,7 @@ TODO: allow custom indexing rather than just family."
                'show-font-mode--overlay-clear-on-change
                'local))
 
-(defun show-font-mode-make-overlay ()
-  "Add color overlay for each distinct font.
-
-Text additions are not updated currently.  Can be undone with
-‘show-font-mode-clear-overlay’.  Will setup self to be undone on
-any modification via ‘first-change-hook’."
-  (interactive)
-  (dolist (pos(number-sequence (point-min) (- (point-max) 1)))
-    (show-font-mode--make-overlay-at pos))
-  (add-hook 'first-change-hook
-            'show-font-mode--overlay-clear-on-change
-            nil 'local))
-
-(defun show-font-mode-clear-overlay()
-  "Remove overlays from ‘show-font-mode-make-overlay’."
-  (interactive)
-  (dolist (ov (overlays-in (point-min) (point-max)))
-    (let ((cat (overlay-get ov 'category)))
-      (when(eq cat 'show-font-mode))
-      (delete-overlay ov))))
 
 (provide 'show-font-mode)
 
-;; (call-interactively 'show-font-mode-make-overlay)
-;; (call-interactively 'show-font-mode-clear-overlay)
-;; (show-font-mode--overlay-clear-on-change)
-;; (mapcar 'overlay-properties (overlays-at (point)))
-;; (setq show-font-mode--known-fonts nil)
-;; (let* ((range (number-sequence 1 5))
-;;        (fonts (mapcar
-;;                (lambda (n)
-;;                  (font-at (- (point-max) n)))
-;;                range)))
-
-;;   fonts)
-;; 色ᵺ💕1
-(provide 'show-font-mode)
 ;;; show-font-mode.el ends here
