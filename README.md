@@ -3,7 +3,7 @@
 Emacs mode to display in the modeline the low-level font being used at
 point, along with its effective pixel dimensions or other properties.
 
-Also provided is `show-font-mode-make-overlay`, which will paint each
+Also provided is `show-font-mode-overlay`, which will paint each
 on-screen font in a different tint.  This should help debug unwanted
 fallback fonts.
 
